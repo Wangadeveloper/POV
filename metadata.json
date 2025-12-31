@@ -1,0 +1,7 @@
+{
+  "name": "POV (Point Of View) - Fashion Fit Intelligence",
+  "description": "An AI-powered fashion fit intelligence application helping users find their perfect size across brands using measurements, baselines, and vision-based fit analysis.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
