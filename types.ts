@@ -25,7 +25,17 @@ export enum MaterialType {
   LINEN = 'Linen'
 }
 
+export interface SizeSpecs {
+  chest?: number;
+  waist?: number;
+  hips?: number;
+  inseam?: number;
+  length?: number;
+}
+
 export interface BodyMeasurements {
+  height?: number;
+  weight?: number;
   waist?: number;
   hips?: number;
   inseam?: number;
@@ -44,20 +54,10 @@ export interface UserProfile {
   images?: string[];
 }
 
-export interface BrandSize {
-  size: string;
-  waist?: number;
-  hips?: number;
-  chest?: number;
-  inseam?: number;
-}
-
-export interface Brand {
-  id: string;
+export interface HeatmapZone {
   name: string;
-  tendency: string; // e.g., "Runs small", "True to size"
-  logo: string;
-  sizeChart: BrandSize[];
+  status: 'tight' | 'perfect' | 'loose';
+  label: string;
 }
 
 export interface Product {
@@ -67,16 +67,29 @@ export interface Product {
   price: string;
   image: string;
   category: ClothingCategory;
+  material: string;
+  fit_type: 'slim' | 'regular' | 'relaxed';
+  size_chart: {
+    unit: 'cm' | 'inch';
+    sizes: Record<string, SizeSpecs>;
+  };
+}
+
+export interface Brand {
+  id: string;
+  name: string;
+  tendency: string; 
+  logo: string;
+  // Added size_chart to satisfy legacy sizingEngine.ts requirements
+  size_chart: Array<{ size: string; waist?: number; chest?: number; }>;
 }
 
 export interface FitRecommendation {
-  brandId: string;
-  brandName: string;
-  recommendedSize: string;
-  fitAssessment: string;
-  warnings: string[];
-  confidenceScore: number;
-  reasoning: string;
+  recommended_size: string;
+  confidence: number;
+  heatmap: Record<string, 'red' | 'green' | 'blue'>;
+  explanation: string;
+  sku: string;
 }
 
 export interface VisionFitSignals {
@@ -85,4 +98,5 @@ export interface VisionFitSignals {
   length: string;
   overall_silhouette: string;
   overall_fit: string;
+  heatmap?: HeatmapZone[];
 }

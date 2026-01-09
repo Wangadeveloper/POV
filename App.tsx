@@ -10,432 +10,350 @@ import {
   FitPreference, 
   MaterialType, 
   UserProfile, 
-  FitRecommendation,
-  VisionFitSignals,
-  Product
+  Product,
+  HeatmapZone,
+  FitRecommendation
 } from './types';
-import { calculateRecommendations } from './services/sizingEngine';
-import { analyzeVisionFit, validateInput, generateVirtualTryOn } from './services/geminiService';
+import { checkFitAPI, analyzeVisionFit, generateVirtualTryOn } from './services/geminiService';
 
 type Mode = 'measurements' | 'baseline' | 'vision';
 type View = 'engine' | 'charts' | 'privacy';
 
+const SilhouetteHeatmap: React.FC<{ heatmap: Record<string, string> }> = ({ heatmap }) => {
+  const getColor = (status?: string) => {
+    switch (status) {
+      case 'red': return '#EF4444';
+      case 'blue': return '#3B82F6';
+      case 'green': return '#10B981';
+      default: return '#F3F4F6';
+    }
+  };
+
+  return (
+    <div className="relative w-full max-w-[240px] mx-auto aspect-[1/2] flex items-center justify-center">
+      <svg viewBox="0 0 100 200" className="w-full h-full drop-shadow-sm">
+        <path d="M50,10 C55,10 60,15 60,20 C60,25 55,30 50,30 C45,30 40,25 40,20 C40,15 45,10 50,10" fill="#F3F4F6" />
+        <path d="M40,30 L60,30 L75,50 L70,80 L60,80 L60,140 L70,190 L55,190 L50,140 L45,190 L30,190 L40,140 L40,80 L30,80 L25,50 Z" fill="#F3F4F6" stroke="#E5E7EB" strokeWidth="1" />
+        
+        <ellipse cx="50" cy="55" rx="18" ry="8" fill={getColor(heatmap.chest)} opacity="0.6" />
+        <ellipse cx="50" cy="85" rx="15" ry="6" fill={getColor(heatmap.waist)} opacity="0.6" />
+        <ellipse cx="50" cy="110" rx="18" ry="8" fill={getColor(heatmap.hips)} opacity="0.6" />
+        <path d="M45,140 L40,170" stroke={getColor(heatmap.inseam)} strokeWidth="4" strokeLinecap="round" opacity="0.6" />
+      </svg>
+      
+      <div className="absolute -bottom-4 left-1/2 -translate-x-1/2 flex gap-4 bg-white/90 backdrop-blur-sm px-4 py-2 rounded-full border border-zinc-100 shadow-sm whitespace-nowrap">
+        <div className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-tighter">
+          <div className="w-2 h-2 rounded-full bg-[#EF4444]"></div> Tight
+        </div>
+        <div className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-tighter">
+          <div className="w-2 h-2 rounded-full bg-[#10B981]"></div> Perfect
+        </div>
+        <div className="flex items-center gap-1.5 text-[9px] font-black uppercase tracking-tighter">
+          <div className="w-2 h-2 rounded-full bg-[#3B82F6]"></div> Loose
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const App: React.FC = () => {
   const [currentView, setCurrentView] = useState<View>('engine');
   const [mode, setMode] = useState<Mode>('measurements');
+  const [wizardStep, setWizardStep] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [fittingLoading, setFittingLoading] = useState(false);
   const [profile, setProfile] = useState<UserProfile>({
     gender: Gender.FEMALE,
     category: ClothingCategory.JEANS,
     fitPreference: FitPreference.REGULAR,
     material: MaterialType.DENIM,
+    measurements: { unit: 'cm' }
   });
   
-  const [recommendations, setRecommendations] = useState<FitRecommendation[]>([]);
-  const [visionSignals, setVisionSignals] = useState<VisionFitSignals | null>(null);
+  const [recommendation, setRecommendation] = useState<FitRecommendation | null>(null);
   const [uploadedImages, setUploadedImages] = useState<string[]>([]);
-  const [tryOnImage, setTryOnImage] = useState<string | null>(null);
   const [selectedProduct, setSelectedProduct] = useState<Product | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [cartCount, setCartCount] = useState(0);
+
+  const wizardSteps = [
+    { label: 'Height', key: 'height', placeholder: 'e.g. 175', unit: 'cm' },
+    { label: 'Weight', key: 'weight', placeholder: 'e.g. 70', unit: 'kg' },
+    { label: 'Chest', key: 'chest', placeholder: 'e.g. 95', unit: 'cm' },
+    { label: 'Waist', key: 'waist', placeholder: 'e.g. 80', unit: 'cm' },
+    { label: 'Hips', key: 'hips', placeholder: 'e.g. 102', unit: 'cm' }
+  ];
 
   const handleCalculate = async () => {
+    if (!selectedProduct) {
+      setError("Please select a product from the Brand Store first.");
+      setCurrentView('charts');
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
-      if (mode === 'measurements' && profile.measurements) {
-        const validation = await validateInput(profile.measurements);
-        if (!validation.isValid) {
-          setError(validation.warning || "Invalid measurements");
-          setLoading(false);
-          return;
-        }
-      }
-
-      const results = await calculateRecommendations(profile);
-      setRecommendations(results);
+      const res = await checkFitAPI(selectedProduct, profile);
+      setRecommendation(res);
     } catch (err) {
-      setError("Failed to calculate fit. Please try again.");
-      console.error(err);
+      setError("Tailor AI failed to process. Try again.");
     } finally {
       setLoading(false);
     }
   };
 
-  const handleStoreCheckFit = async (product: Product) => {
+  const handleStoreCheckFit = (product: Product) => {
     setSelectedProduct(product);
+    setRecommendation(null);
     setCurrentView('engine');
-    
-    // If the user has uploaded an image, trigger virtual try-on automatically
-    if (uploadedImages.length > 0) {
-      setFittingLoading(true);
-      try {
-        const result = await generateVirtualTryOn(uploadedImages[0], product, profile);
-        setTryOnImage(result);
-        
-        // Also run the calculation for the specific brand
-        const results = await calculateRecommendations(profile);
-        setRecommendations(results);
-      } catch (err) {
-        console.error("Try-on failed", err);
-      } finally {
-        setFittingLoading(false);
-      }
-    } else {
-       setMode('vision');
-       setError("Upload a photo first for a Visual Fit.");
-    }
   };
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || files.length === 0) return;
-
     setLoading(true);
     const base64Images: string[] = [];
-
     for (let i = 0; i < files.length; i++) {
-      const file = files[i];
       const reader = new FileReader();
-      const promise = new Promise<string>((resolve) => {
-        reader.onload = (e) => resolve(e.target?.result as string);
-      });
-      reader.readAsDataURL(file);
+      const promise = new Promise<string>((res) => { reader.onload = (e) => res(e.target?.result as string); });
+      reader.readAsDataURL(files[i]);
       base64Images.push(await promise);
     }
-
     setUploadedImages(base64Images);
-
     try {
       const signals = await analyzeVisionFit(base64Images);
-      setVisionSignals(signals);
-    } catch (err) {
-      setError("Vision analysis failed. Ensure photos show the garment clearly.");
-    } finally {
-      setLoading(false);
-    }
+      setProfile(p => ({ ...p, visionSignals: signals }));
+      if (selectedProduct) {
+        const res = await checkFitAPI(selectedProduct, { ...profile, images: base64Images });
+        setRecommendation(res);
+      }
+    } catch (err) { setError("Vision analysis failed."); } 
+    finally { setLoading(false); }
   };
 
+  const currentStepData = wizardSteps[wizardStep];
+  const currentValue = profile.measurements ? (profile.measurements as any)[currentStepData.key] : '';
+
   const renderEngine = () => (
-    <>
-      <div className="mb-10 text-center">
-        <h2 className="text-3xl font-black tracking-tight mb-2 text-zinc-900">Find Your Perfect Fit</h2>
-        <p className="text-zinc-500 font-medium">Cross-brand sizing intelligence for the modern shopper.</p>
+    <div className="animate-in fade-in duration-700">
+      <div className="mb-12 text-center max-w-xl mx-auto">
+        <h2 className="text-4xl font-black tracking-tighter mb-4 text-zinc-900 uppercase">Virtual Fit Studio</h2>
+        <p className="text-zinc-500 font-medium text-lg leading-relaxed italic">Precision sizing for the modern wardrobe.</p>
       </div>
 
-      <PrivacyDisclaimer />
+      {selectedProduct && (
+        <div className="max-w-4xl mx-auto mb-12 flex flex-col md:flex-row gap-6 items-center bg-white p-6 rounded-[2rem] border border-zinc-100 shadow-sm animate-in zoom-in-95">
+          <img src={selectedProduct.image} className="w-32 h-40 object-cover rounded-xl shadow-md" alt={selectedProduct.name} />
+          <div className="flex-1">
+             <p className="text-[10px] font-black uppercase tracking-[0.2em] text-zinc-400">Context: {selectedProduct.category}</p>
+             <h3 className="text-2xl font-black text-zinc-900">{selectedProduct.name}</h3>
+             <p className="text-sm text-zinc-500 font-medium italic mt-1">{selectedProduct.material} • {selectedProduct.fit_type} cut</p>
+          </div>
+          <button onClick={() => setCurrentView('charts')} className="px-6 py-2 border border-zinc-200 rounded-full text-[10px] font-black uppercase tracking-widest hover:bg-zinc-50">Change Item</button>
+        </div>
+      )}
 
-      {/* Mode Selector */}
-      <div className="flex bg-zinc-200 p-1 rounded-full mb-8 max-w-md mx-auto">
+      <div className="flex bg-zinc-100 p-1.5 rounded-full mb-12 max-w-sm mx-auto border border-zinc-200">
         {(['measurements', 'baseline', 'vision'] as Mode[]).map((m) => (
           <button
             key={m}
-            onClick={() => setMode(m)}
-            className={`flex-1 py-2 text-sm font-bold rounded-full transition-all ${
-              mode === m ? 'bg-white shadow-sm text-black' : 'text-zinc-600 hover:text-black'
+            onClick={() => { setMode(m); setWizardStep(0); }}
+            className={`flex-1 py-2.5 text-[11px] font-black uppercase tracking-widest rounded-full transition-all ${
+              mode === m ? 'bg-white shadow-lg text-black' : 'text-zinc-500 hover:text-black'
             }`}
           >
-            {m.charAt(0).toUpperCase() + m.slice(1)}
+            {m}
           </button>
         ))}
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-10">
-        {/* Input Panel */}
-        <div className="lg:col-span-5 space-y-6">
-          <div className="glass-panel p-6 rounded-2xl shadow-sm space-y-4">
-            <h3 className="font-bold text-lg flex items-center gap-2 text-zinc-900">
-              <span className="w-2 h-2 bg-black rounded-full"></span>
-              Basic Info
-            </h3>
-            
-            <div className="space-y-4">
-              <div>
-                <label className="text-xs font-black uppercase tracking-widest text-zinc-500 mb-1 block">Category</label>
-                <select 
-                  className="w-full bg-white border border-zinc-300 rounded-lg px-3 py-2 text-sm font-bold text-zinc-900 focus:ring-2 focus:ring-black outline-none"
-                  value={profile.category}
-                  onChange={(e) => setProfile({...profile, category: e.target.value as ClothingCategory})}
-                >
-                  {Object.values(ClothingCategory).map(v => <option key={v} value={v}>{v}</option>)}
-                </select>
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
-                <div>
-                  <label className="text-xs font-black uppercase tracking-widest text-zinc-500 mb-1 block">Preference</label>
-                  <select 
-                    className="w-full bg-white border border-zinc-300 rounded-lg px-3 py-2 text-sm font-bold text-zinc-900 focus:ring-2 focus:ring-black outline-none"
-                    value={profile.fitPreference}
-                    onChange={(e) => setProfile({...profile, fitPreference: e.target.value as FitPreference})}
-                  >
-                    {Object.values(FitPreference).map(v => <option key={v} value={v}>{v}</option>)}
-                  </select>
-                </div>
-                <div>
-                  <label className="text-xs font-black uppercase tracking-widest text-zinc-500 mb-1 block">Material</label>
-                  <select 
-                    className="w-full bg-white border border-zinc-300 rounded-lg px-3 py-2 text-sm font-bold text-zinc-900 focus:ring-2 focus:ring-black outline-none"
-                    value={profile.material}
-                    onChange={(e) => setProfile({...profile, material: e.target.value as MaterialType})}
-                  >
-                    {Object.values(MaterialType).map(v => <option key={v} value={v}>{v}</option>)}
-                  </select>
-                </div>
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-16">
+        <div className="lg:col-span-5 space-y-8">
+          <div className="glass-panel p-8 rounded-[2.5rem] shadow-xl border border-white/50 space-y-8 max-w-md mx-auto w-full min-h-[450px] flex flex-col">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="font-black text-xs uppercase tracking-[0.2em] text-zinc-400">01 Tailor Inputs</h3>
+              <div className="flex gap-1.5">
+                {[0, 1, 2].map(i => <div key={i} className={`w-1.5 h-1.5 rounded-full ${i === (mode === 'measurements' ? 0 : mode === 'baseline' ? 1 : 2) ? 'bg-black' : 'bg-zinc-200'}`} />)}
               </div>
             </div>
 
-            <hr className="border-zinc-200" />
-
             {mode === 'measurements' && (
-              <div className="space-y-4 animate-in fade-in duration-300">
-                <h3 className="font-black text-xs uppercase tracking-widest text-zinc-400">Measurements (cm)</h3>
-                <div className="grid grid-cols-2 gap-4">
-                  <input 
-                    type="number" 
-                    placeholder="Waist" 
-                    className="w-full border border-zinc-300 rounded-lg px-3 py-2 text-sm font-bold text-zinc-900 focus:ring-2 focus:ring-black outline-none"
-                    onChange={(e) => setProfile({
-                      ...profile, 
-                      measurements: { ...profile.measurements, waist: parseFloat(e.target.value), unit: 'cm' }
-                    })}
-                  />
-                  <input 
-                    type="number" 
-                    placeholder="Hips" 
-                    className="w-full border border-zinc-300 rounded-lg px-3 py-2 text-sm font-bold text-zinc-900 focus:ring-2 focus:ring-black outline-none"
-                    onChange={(e) => setProfile({
-                      ...profile, 
-                      measurements: { ...profile.measurements, hips: parseFloat(e.target.value), unit: 'cm' }
-                    })}
-                  />
+              <div className="space-y-10 py-4 flex-1 flex flex-col justify-between">
+                <div className="relative">
+                   <p className="text-[10px] font-black uppercase text-zinc-400 mb-2 tracking-widest">Step {wizardStep + 1} of {wizardSteps.length}</p>
+                   <h4 className="text-3xl font-black text-zinc-900 mb-8">{currentStepData.label}</h4>
+                   <div className="relative">
+                    <input 
+                        type="number"
+                        placeholder={currentStepData.placeholder}
+                        value={currentValue || ''}
+                        className="w-full text-6xl font-black text-zinc-900 bg-transparent border-b-4 border-zinc-100 focus:border-black outline-none pb-6 transition-all placeholder:text-zinc-100 appearance-none"
+                        onChange={(e) => setProfile({
+                          ...profile,
+                          measurements: { ...profile.measurements!, [currentStepData.key]: parseFloat(e.target.value) }
+                        })}
+                    />
+                    <span className="absolute bottom-8 right-0 text-zinc-300 font-black italic text-xl uppercase tracking-widest">{currentStepData.unit}</span>
+                   </div>
+                </div>
+                
+                <div className="flex gap-4">
+                  <button 
+                    disabled={wizardStep === 0}
+                    onClick={() => setWizardStep(s => s - 1)}
+                    className="flex-1 py-5 border border-zinc-200 rounded-2xl font-black uppercase text-[10px] tracking-widest disabled:opacity-20 hover:bg-zinc-50 transition-colors"
+                  >
+                    Back
+                  </button>
+                  <button 
+                    disabled={!currentValue}
+                    onClick={() => {
+                      if (wizardStep < wizardSteps.length - 1) {
+                        setWizardStep(s => s + 1);
+                      } else {
+                        handleCalculate();
+                      }
+                    }}
+                    className="flex-[2] py-5 bg-black text-white rounded-2xl font-black uppercase text-[10px] tracking-widest hover:bg-zinc-800 shadow-xl shadow-black/10 transition-all disabled:bg-zinc-200"
+                  >
+                    {wizardStep === wizardSteps.length - 1 ? 'Unlock Fit POV' : 'Continue'}
+                  </button>
                 </div>
               </div>
             )}
 
             {mode === 'baseline' && (
-              <div className="space-y-4 animate-in fade-in duration-300">
-                <h3 className="font-black text-xs uppercase tracking-widest text-zinc-400">Your Best Fit</h3>
-                <input 
-                  type="text" 
-                  placeholder="e.g. Zara size 38 jeans" 
-                  className="w-full border border-zinc-300 rounded-lg px-3 py-2 text-sm font-bold text-zinc-900 focus:ring-2 focus:ring-black outline-none"
-                  value={profile.baseline || ''}
-                  onChange={(e) => setProfile({...profile, baseline: e.target.value})}
-                />
-                <p className="text-xs text-zinc-500 italic font-medium">We use this to infer your fit profile across other brands.</p>
+              <div className="space-y-8 py-4 animate-in slide-in-from-right-4 duration-500">
+                <h4 className="text-2xl font-black text-zinc-900">Reference Brand</h4>
+                <p className="text-sm text-zinc-500 font-medium">Map your current favorites to the POV matrix.</p>
+                <div className="space-y-2">
+                  <label className="text-[9px] font-black uppercase text-zinc-400 tracking-widest">Brand and Tag Size</label>
+                  <input 
+                    type="text" 
+                    placeholder="e.g. Levi's 32" 
+                    className="w-full border-b-2 border-zinc-100 py-5 text-xl font-bold text-zinc-900 outline-none focus:border-black transition-all"
+                    value={profile.baseline || ''}
+                    onChange={(e) => setProfile({...profile, baseline: e.target.value})}
+                  />
+                </div>
+                <button 
+                  onClick={handleCalculate}
+                  className="w-full py-5 bg-black text-white rounded-2xl font-black uppercase text-[10px] tracking-widest hover:bg-zinc-800 mt-12"
+                >
+                  Calculate Fit Logic
+                </button>
               </div>
             )}
 
             {mode === 'vision' && (
-              <div className="space-y-4 animate-in fade-in duration-300">
-                 <h3 className="font-black text-xs uppercase tracking-widest text-zinc-400">Fit Analysis Photos</h3>
-                 
-                 {uploadedImages.length > 0 && (
-                   <div className="grid grid-cols-3 gap-2 mb-4">
-                     {uploadedImages.map((src, i) => (
-                       <div key={i} className="aspect-square rounded-lg overflow-hidden border border-zinc-200 bg-zinc-100 shadow-sm">
-                         <img src={src} alt={`Upload ${i}`} className="w-full h-full object-cover" />
-                       </div>
-                     ))}
-                   </div>
-                 )}
-
-                 <div className="border-2 border-dashed border-zinc-300 rounded-xl p-6 text-center hover:border-black transition-colors group">
-                    <input 
-                      type="file" 
-                      multiple 
-                      accept="image/*" 
-                      className="hidden" 
-                      id="vision-upload"
-                      onChange={handleFileUpload}
-                    />
-                    <label htmlFor="vision-upload" className="cursor-pointer">
-                      <svg className="mx-auto h-8 w-8 text-zinc-400 group-hover:text-black transition-colors" stroke="currentColor" fill="none" viewBox="0 0 48 48" aria-hidden="true"><path d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8m-12 4h.02" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg>
-                      <span className="mt-2 block text-sm font-black text-zinc-900">
-                        {uploadedImages.length > 0 ? 'Replace photos' : 'Upload 2-3 fit photos'}
+              <div className="space-y-8 py-4 animate-in slide-in-from-right-4 duration-500">
+                 <h4 className="text-2xl font-black text-zinc-900">Neural Vision</h4>
+                 <div className="border-2 border-dashed border-zinc-200 rounded-[2rem] p-12 text-center hover:border-black transition-all group bg-zinc-50/50">
+                    <input type="file" multiple accept="image/*" className="hidden" id="vision-upload" onChange={handleFileUpload} />
+                    <label htmlFor="vision-upload" className="cursor-pointer block">
+                      <svg className="mx-auto h-14 w-14 text-zinc-200 group-hover:text-black transition-colors mb-4" stroke="currentColor" fill="none" viewBox="0 0 48 48"><path d="M28 8H12a4 4 0 00-4 4v20m32-12v8m0 0v8a4 4 0 01-4 4H12a4 4 0 01-4-4v-4m32-4l-3.172-3.172a4 4 0 00-5.656 0L28 28M8 32l9.172-9.172a4 4 0 015.656 0L28 28m0 0l4 4m4-24h8m-4-4v8m-12 4h.02" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                      <span className="text-xs font-black uppercase tracking-widest text-zinc-900 group-hover:underline">
+                        {uploadedImages.length > 0 ? 'Replace Scans' : 'Start Fit Scan'}
                       </span>
-                      <p className="mt-1 text-xs text-zinc-500 font-medium">Privacy guaranteed. Automated purging active.</p>
                     </label>
                  </div>
-                 
-                 {visionSignals && (
-                   <div className="bg-zinc-100 p-3 rounded-lg border border-zinc-200">
-                      <h4 className="text-[10px] font-black uppercase text-zinc-600 mb-2 tracking-widest">Qualitative Fit Signals</h4>
-                      <div className="flex flex-wrap gap-2">
-                         <span className="px-2 py-1 bg-white border border-zinc-200 text-[10px] font-bold text-zinc-900 rounded-full">Waist: {visionSignals.waist_fit}</span>
-                         <span className="px-2 py-1 bg-white border border-zinc-200 text-[10px] font-bold text-zinc-900 rounded-full">Length: {visionSignals.length}</span>
-                         <span className="px-2 py-1 bg-white border border-zinc-200 text-[10px] font-bold text-zinc-900 rounded-full">Silhouette: {visionSignals.overall_silhouette}</span>
-                      </div>
-                   </div>
+                 {loading && (
+                    <div className="flex items-center gap-4 p-5 bg-zinc-900 rounded-3xl text-white shadow-xl animate-pulse">
+                       <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                       <span className="text-[10px] font-black uppercase tracking-[0.2em]">Estimating Proportions...</span>
+                    </div>
                  )}
               </div>
             )}
-
-            <button 
-              onClick={handleCalculate}
-              disabled={loading}
-              className="w-full py-3 bg-black text-white rounded-xl font-black text-sm hover:bg-zinc-800 transition-all disabled:bg-zinc-400 shadow-lg shadow-black/10 uppercase tracking-widest"
-            >
-              {loading ? 'Analyzing...' : 'Calculate My Fit'}
-            </button>
             
-            {error && <p className="text-red-600 text-xs font-bold text-center mt-2">{error}</p>}
+            {error && <p className="text-red-600 text-[10px] font-black uppercase text-center mt-auto bg-red-50 p-4 rounded-xl">{error}</p>}
           </div>
         </div>
 
-        {/* Results Panel */}
-        <div className="lg:col-span-7 space-y-6">
-          {(fittingLoading || tryOnImage) ? (
-            <div className="animate-in fade-in zoom-in-95 duration-500">
-               <div className="flex items-center justify-between mb-4">
-                  <h3 className="text-xl font-black text-zinc-900 uppercase tracking-tight">Virtual Studio</h3>
-                  {selectedProduct && <span className="text-[10px] font-black bg-zinc-100 px-3 py-1 rounded-full text-zinc-500 uppercase tracking-widest">Fitting: {selectedProduct.name}</span>}
-               </div>
-
-               <div className="relative aspect-[3/4] md:aspect-auto md:h-[600px] w-full rounded-3xl overflow-hidden bg-zinc-100 border border-zinc-200 shadow-2xl">
-                  {fittingLoading ? (
-                    <div className="absolute inset-0 flex flex-col items-center justify-center bg-white/60 backdrop-blur-xl z-10">
-                       <div className="w-12 h-12 border-4 border-black border-t-transparent rounded-full animate-spin mb-4"></div>
-                       <p className="text-zinc-900 font-black uppercase tracking-widest text-xs animate-pulse">Draping Fabric...</p>
-                    </div>
-                  ) : null}
-                  
-                  {tryOnImage ? (
-                    <img src={tryOnImage} className="w-full h-full object-cover" alt="Virtual Try-On Result" />
-                  ) : (
-                    <div className="w-full h-full flex items-center justify-center">
-                       <p className="text-zinc-400 font-bold italic">Processing your POV...</p>
-                    </div>
-                  )}
-
-                  <div className="absolute bottom-6 left-6 right-6">
-                     {recommendations.length > 0 && recommendations.find(r => r.brandId === selectedProduct?.brandId) && (
-                       <div className="glass-panel p-4 rounded-2xl shadow-xl border-white/40 animate-in slide-in-from-bottom-4 duration-700 delay-300">
-                          <div className="flex justify-between items-end">
-                             <div>
-                                <p className="text-[10px] font-black text-zinc-500 uppercase tracking-widest">Recommended Size</p>
-                                <h4 className="text-2xl font-black text-zinc-900">
-                                   {recommendations.find(r => r.brandId === selectedProduct?.brandId)?.recommendedSize}
-                                </h4>
-                             </div>
-                             <div className="text-right">
-                                <p className="text-[10px] font-black text-green-600 uppercase tracking-widest">Fit Match</p>
-                                <p className="text-sm font-bold text-zinc-900">{recommendations.find(r => r.brandId === selectedProduct?.brandId)?.confidenceScore}% Confidence</p>
-                             </div>
-                          </div>
-                          <p className="mt-3 text-xs text-zinc-700 leading-relaxed italic border-t pt-3 border-zinc-200">
-                             "{recommendations.find(r => r.brandId === selectedProduct?.brandId)?.reasoning}"
-                          </p>
-                       </div>
-                     )}
+        <div className="lg:col-span-7">
+          {loading ? (
+             <div className="space-y-10">
+                <div className="h-80 bg-zinc-100 rounded-[3rem] animate-pulse" />
+                <div className="h-32 bg-zinc-100 rounded-[3rem] animate-pulse" />
+             </div>
+          ) : recommendation ? (
+            <div className="space-y-16 animate-in slide-in-from-bottom-8 duration-700">
+               <div className="flex items-end justify-between border-b-2 border-zinc-100 pb-6">
+                  <div>
+                    <h3 className="text-[11px] font-black uppercase tracking-[0.4em] text-zinc-400 mb-2">02 Fit Outcome</h3>
+                    <h4 className="text-4xl font-black text-zinc-900 tracking-tighter">Your POV Fit</h4>
+                  </div>
+                  <div className="text-right">
+                    <span className="text-7xl font-black text-zinc-900 tracking-tighter">{recommendation.recommended_size}</span>
                   </div>
                </div>
-               
-               <div className="mt-4 flex gap-4">
-                  <button className="flex-1 py-4 bg-black text-white rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-zinc-800 shadow-xl shadow-black/10 transition-all">Add to Cart</button>
-                  <button onClick={() => { setTryOnImage(null); setSelectedProduct(null); }} className="px-6 py-4 bg-white border border-zinc-200 text-zinc-900 rounded-2xl font-black uppercase tracking-widest text-xs hover:bg-zinc-50 transition-all">Reset Studio</button>
+
+               <div className="grid grid-cols-1 md:grid-cols-2 gap-16 items-start">
+                  <div className="bg-white p-14 rounded-[4rem] shadow-2xl shadow-zinc-200/50 border border-zinc-100 relative overflow-hidden">
+                     <SilhouetteHeatmap heatmap={recommendation.heatmap} />
+                  </div>
+
+                  <div className="space-y-10 py-4">
+                     <div className="space-y-3">
+                        <div className="flex items-center justify-between px-1">
+                           <span className="text-[11px] font-black uppercase tracking-[0.2em] text-zinc-400">Match Confidence</span>
+                           <span className="text-sm font-black text-zinc-900">{Math.round(recommendation.confidence * 100)}%</span>
+                        </div>
+                        <div className="h-2 w-full bg-zinc-50 rounded-full overflow-hidden border border-zinc-100 p-0.5">
+                           <div className="h-full bg-black transition-all duration-1000 ease-out rounded-full" style={{ width: `${recommendation.confidence * 100}%` }} />
+                        </div>
+                     </div>
+
+                     <div className="space-y-5">
+                        <h5 className="text-[11px] font-black uppercase tracking-[0.2em] text-zinc-900">Tailor Reasoning</h5>
+                        <p className="text-xl text-zinc-700 font-medium leading-relaxed italic border-l-4 border-zinc-100 pl-6">
+                          "{recommendation.explanation}"
+                        </p>
+                     </div>
+                  </div>
+               </div>
+
+               <div className="flex gap-6 pb-20">
+                  <button 
+                    onClick={() => { setCartCount(c => c + 1); setRecommendation(null); setSelectedProduct(null); setCurrentView('charts'); }}
+                    className="flex-[2] py-6 bg-black text-white rounded-[2.5rem] font-black uppercase tracking-[0.3em] text-sm hover:bg-zinc-800 shadow-2xl shadow-black/20 transition-all transform hover:-translate-y-1"
+                  >
+                    Add {recommendation.recommended_size} To Cart
+                  </button>
+                  <button onClick={() => setRecommendation(null)} className="flex-1 py-6 bg-white border-2 border-zinc-200 text-zinc-900 rounded-[2.5rem] font-black uppercase tracking-[0.3em] text-sm hover:bg-zinc-50 transition-all">
+                    Reset Fit
+                  </button>
                </div>
             </div>
           ) : (
-            <>
-              {!loading && recommendations.length === 0 && (
-                <div className="h-full min-h-[500px] flex flex-col items-center justify-center text-center p-10 border border-zinc-200 rounded-3xl bg-white/30 border-dashed">
-                  <div className="w-20 h-20 bg-zinc-100 rounded-full flex items-center justify-center mb-6">
-                    <svg className="w-10 h-10 text-zinc-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z"/></svg>
-                  </div>
-                  <h3 className="text-2xl font-black text-zinc-900 tracking-tight uppercase">Ready for your POV?</h3>
-                  <p className="text-zinc-500 mt-2 font-medium max-w-sm mx-auto">Upload your photo in Vision mode or select an item from the Store to see your Virtual Fit result here.</p>
-                  <button onClick={() => setCurrentView('charts')} className="mt-8 px-6 py-3 bg-black text-white rounded-full font-black uppercase tracking-widest text-[11px]">Go to Brand Store</button>
-                </div>
-              )}
-
-              {loading && (
-                <div className="space-y-6">
-                  {[1, 2, 3].map(i => (
-                    <div key={i} className="h-40 bg-zinc-100 rounded-3xl animate-pulse" />
-                  ))}
-                </div>
-              )}
-
-              {!loading && recommendations.length > 0 && (
-                <div className="space-y-4 animate-in slide-in-from-bottom-4 duration-500">
-                  <div className="flex items-center justify-between mb-2">
-                      <h3 className="text-xl font-black text-zinc-900 uppercase tracking-tight">Global Sizing Report</h3>
-                      <span className="text-xs font-bold text-green-700 bg-green-50 px-3 py-1 rounded-full uppercase tracking-tighter border border-green-100">Verified Fit</span>
-                  </div>
-                  {recommendations.map((rec) => (
-                    <div key={rec.brandId} className="bg-white border border-zinc-100 p-6 rounded-3xl shadow-sm hover:shadow-lg transition-all group">
-                      <div className="flex items-start justify-between">
-                        <div className="flex items-center gap-4">
-                          <img src={rec.brandName === "Levi's" ? "https://logo.clearbit.com/levis.com" : `https://logo.clearbit.com/${rec.brandName.toLowerCase()}.com`} 
-                            onError={(e) => { (e.target as HTMLImageElement).src = "https://picsum.photos/40/40" }}
-                            className="w-12 h-12 rounded-xl object-contain bg-zinc-50 border border-zinc-100 p-2" 
-                          />
-                          <div>
-                            <h4 className="font-black text-lg text-zinc-900">{rec.brandName}</h4>
-                            <p className="text-[10px] text-zinc-500 font-bold uppercase tracking-widest">{rec.fitAssessment}</p>
-                          </div>
-                        </div>
-                        <div className="text-right">
-                          <div className="text-3xl font-black text-zinc-900">{rec.recommendedSize}</div>
-                          <div className="text-[10px] font-black uppercase text-zinc-400">Match</div>
-                        </div>
-                      </div>
-                      
-                      <div className="mt-4 p-4 bg-zinc-50 rounded-2xl border border-zinc-100">
-                         <p className="text-sm text-zinc-800 leading-relaxed italic font-medium">
-                           "{rec.reasoning}"
-                         </p>
-                      </div>
-
-                      <div className="mt-4 flex items-center justify-between">
-                         <div className="flex flex-wrap gap-2">
-                            {rec.warnings.map((w, idx) => (
-                              <span key={idx} className="text-[9px] bg-amber-50 text-amber-700 px-2 py-1 rounded font-black uppercase tracking-tight border border-amber-100">
-                                  {w}
-                              </span>
-                            ))}
-                            <div className="flex items-center gap-1 text-[10px] font-black text-zinc-400 uppercase tracking-widest ml-2">
-                               {rec.confidenceScore}% Score
-                            </div>
-                         </div>
-                         <button 
-                          onClick={() => setCurrentView('charts')}
-                          className="text-[10px] font-black flex items-center gap-1 hover:underline text-zinc-900 uppercase tracking-widest bg-zinc-100 px-3 py-2 rounded-lg"
-                         >
-                            Shop
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14m-7-7 7 7-7 7"/></svg>
-                         </button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </>
+            <div className="h-full min-h-[600px] flex flex-col items-center justify-center text-center p-20 border-4 border-zinc-100 rounded-[4rem] bg-white border-dashed group hover:border-zinc-200 transition-all">
+              <div className="w-28 h-28 bg-zinc-50 rounded-full flex items-center justify-center mb-10 group-hover:scale-110 group-hover:bg-black group-hover:text-white transition-all duration-700 shadow-sm border border-zinc-100">
+                <svg className="w-12 h-12" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="1" d="M12 4v1m6 11h2m-6 0h-2v4m0-11v3m0 0h.01M12 12h4.01M16 20h4M4 12h4m12 0h.01M5 8l2-2 3 3L12 7l3 3 2-2M9 21h6"/></svg>
+              </div>
+              <h3 className="text-4xl font-black text-zinc-900 tracking-tighter uppercase mb-4">Awaiting Fit POV</h3>
+              <p className="text-zinc-500 font-medium max-w-md mx-auto mb-10 text-lg leading-relaxed italic">Complete your tailoring profile to unlock the POV fit matrix for this garment.</p>
+              <button onClick={() => setCurrentView('charts')} className="px-12 py-4 bg-zinc-900 text-white rounded-full font-black uppercase tracking-[0.2em] text-[11px] hover:bg-black transition-all">Shop The Collection</button>
+            </div>
           )}
         </div>
       </div>
-    </>
+    </div>
   );
 
   return (
-    <div className="min-h-screen flex flex-col">
-      <Header currentView={currentView} onNavigate={(v) => setCurrentView(v as View)} />
-      
-      <main className="flex-1 max-w-6xl mx-auto w-full px-4 py-8 md:py-12">
+    <div className="min-h-screen flex flex-col bg-[#FDFDFD]">
+      <Header currentView={currentView} onNavigate={(v) => setCurrentView(v as View)} cartCount={cartCount} />
+      <main className="flex-1 max-w-7xl mx-auto w-full px-6 py-12 md:py-20">
         {currentView === 'engine' && renderEngine()}
         {currentView === 'charts' && <BrandStore onCheckFit={handleStoreCheckFit} />}
         {currentView === 'privacy' && <PrivacyPolicy />}
       </main>
-
-      <footer className="py-10 border-t bg-zinc-50 mt-12">
-        <div className="max-w-6xl mx-auto px-4 flex flex-col md:flex-row items-center justify-between text-zinc-400 text-[11px] font-bold uppercase tracking-widest">
-          <div className="mb-4 md:mb-0">© 2024 POV Intelligence. Sizing the future.</div>
-          <div className="flex gap-6">
-            <button onClick={() => setCurrentView('privacy')} className="hover:text-black transition-colors">Privacy Policy</button>
-            <a href="#" className="hover:text-black transition-colors">Terms of Service</a>
-            <a href="#" className="hover:text-black transition-colors">Ethical AI Report</a>
+      <footer className="py-20 border-t border-zinc-100 mt-20 bg-white">
+        <div className="max-w-7xl mx-auto px-6 flex flex-col md:flex-row items-center justify-between text-zinc-400 text-[10px] font-black uppercase tracking-[0.3em]">
+          <div>© 2024 POV Intelligence. Sizing API v1.0.</div>
+          <div className="flex gap-12 mt-4 md:mt-0">
+            <button onClick={() => setCurrentView('privacy')} className="hover:text-black">Privacy Policy</button>
+            <a href="#" className="hover:text-black">Terms of Service</a>
+            <a href="#" className="hover:text-black">Partner API</a>
           </div>
         </div>
       </footer>
